@@ -2199,40 +2199,50 @@ cdef class DataEngine(Component):
     cpdef void _handle_bar(self, Bar bar, bint historical = False):
         cdef:
             BarType bar_type = bar.bar_type
-            Bar cached_bar
             Bar last_bar
-            list bars
-            int i
-        if self._validate_data_sequence:
-            last_bar = self._cache.bar(bar_type)
-            if last_bar is not None:
-                if bar.ts_event < last_bar.ts_event:
-                    self._log.warning(
-                        f"Bar {bar} was prior to last bar `ts_event` {last_bar.ts_event}",
-                    )
-                    return  # `bar` is out of sequence
+        last_bar = self._cache.bar(bar_type)
+        if self._validate_data_sequence and last_bar is not None:
+            if bar.ts_event < last_bar.ts_event:
+                self._log.warning(
+                    f"Bar {bar} was prior to last bar `ts_event` {last_bar.ts_event}",
+                )
+                return  # `bar` is out of sequence
 
-                if bar.ts_init < last_bar.ts_init:
-                    self._log.warning(
-                        f"Bar {bar} was prior to last bar `ts_init` {last_bar.ts_init}",
-                    )
-                    return  # `bar` is out of sequence
+            if bar.ts_init < last_bar.ts_init:
+                self._log.warning(
+                    f"Bar {bar} was prior to last bar `ts_init` {last_bar.ts_init}",
+                )
+                return  # `bar` is out of sequence
 
-                if bar.is_revision:
-                    if bar.ts_event == last_bar.ts_event:
-                        # Replace `last_bar`, previously cached bar will fall out of scope
-                        self._cache._bars.get(bar_type)[0] = bar  # noqa
-                    elif bar.ts_event > last_bar.ts_event:
-                        # Bar is latest, consider as new bar
-                        self._cache.add_bar(bar)
-                    else:
-                        self._log.warning(
-                            f"Bar revision {bar} was not at last bar `ts_event` {last_bar.ts_event}",
-                        )
-                        return  # Revision SHOULD be at `last_bar.ts_event`
+        if not (historical and self._disable_historical_cache):
+            is_update_to_last_bar = last_bar is not None and bar.ts_event == last_bar.ts_event
 
-        if not bar.is_revision and not (historical and self._disable_historical_cache):
-            self._cache.add_bar(bar)
+            if is_update_to_last_bar:
+                # Do not allow a stale in-progress revision from an internal time-bar aggregator
+                # to overwrite the already finalized bar for the same interval.
+                is_stale_internal_revision = (
+                    bar.is_revision
+                    and not last_bar.is_revision
+                    and bar_type.is_internally_aggregated()
+                )
+                if is_stale_internal_revision:
+                    return
+
+                # Preserve behavior: external revisions are cached only when sequence validation is enabled.
+                # A non-revision always replaces. For revisions, we replace if it's from an internal
+                # aggregator, or if it's an external revision and sequence validation is enabled.
+                if not bar.is_revision:
+                    should_replace = True
+                else:
+                    should_replace = bar_type.is_internally_aggregated() or self._validate_data_sequence
+                if should_replace:
+                    # Replace `last_bar`, previously cached bar will fall out of scope
+                    self._cache.replace_last_bar(bar)
+            else:
+                # Cache revisions only if they are for a newer interval, otherwise treat as stale.
+                should_add = not bar.is_revision or last_bar is None or bar.ts_event > last_bar.ts_event
+                if should_add:
+                    self._cache.add_bar(bar)
 
         self._msgbus.publish_c(topic=self._topic_cache.get_bars_topic(bar_type, historical), msg=bar)
 
@@ -2716,6 +2726,7 @@ cdef class DataEngine(Component):
                 build_with_no_updates=self._time_bars_build_with_no_updates,
                 time_bars_origin_offset=time_bars_origin_offset,
                 bar_build_delay=self._time_bars_build_delay,
+                handle_revised_bars=params.get("handle_revised_bars", False),
             )
         elif bar_type.spec.aggregation == BarAggregation.TICK:
             aggregator = TickBarAggregator(

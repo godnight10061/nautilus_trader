@@ -58,6 +58,11 @@ cdef class BarBuilder:
     cdef Price _close
     cdef Quantity volume
 
+    cpdef Price open(self)
+    cpdef Price high(self)
+    cpdef Price low(self)
+    cpdef Price close(self)
+
     cpdef void update(self, Price price, Quantity size, uint64_t ts_init)
     cpdef void update_bar(self, Bar bar, Quantity volume, uint64_t ts_init)
     cpdef void reset(self)
@@ -156,6 +161,7 @@ cdef class TimeBarAggregator(BarAggregator):
     cdef bint _timestamp_on_close
     cdef bint _skip_first_non_full_bar
     cdef bint _build_with_no_updates
+    cdef bint _handle_revised_bars
     cdef int _bar_build_delay
     cdef object _time_bars_origin_offset
     cdef list _historical_events
@@ -167,6 +173,7 @@ cdef class TimeBarAggregator(BarAggregator):
     cpdef void stop_timer(self)
     cdef void _pre_process_historical_events(self, uint64_t ts_init)
     cdef void _post_process_historical_events(self)
+    cdef void _build_and_send_revision(self, uint64_t ts_init)
     cpdef void _build_bar(self, TimeEvent event)
 
 
